@@ -9,9 +9,9 @@ on:
 # 전역 환경 변수 설정
 env:
   AWS_REGION: ap-northeast-2 # AWS 리전 설정 (서울 리전)
-  ECR_REPOSITORY: sbcntr-backend # ECR 저장소 이름 설정
+  ECR_REPOSITORY: 3tier-ecr # ECR 저장소 이름 설정
   EKS_CLUSTER_NAME: eks-cluster # EKS 클러스터 이름 설정
-  DEPLOYMENT_NAME: sbcntr-backend # 쿠버네티스 디플로이먼트 이름 설정
+  DEPLOYMENT_NAME: # TODO # 쿠버네티스 디플로이먼트 이름 설정
 # 작업(job) 정의 시작
 jobs:
   # 테스트 작업 정의
