@@ -1,47 +1,12 @@
 pipeline {
-    agent {
-        kubernetes {
-            yaml '''
-apiVersion: v1
-kind: Pod
-spec:
-  containers:
-  - name: golang
-    image: golang:1.19
-    command:
-    - cat
-    tty: true
-  - name: docker
-    image: docker:latest
-    command:
-    - cat
-    tty: true
-    volumeMounts:
-    - name: docker-sock
-      mountPath: /var/run/docker.sock
-  - name: aws
-    image: amazon/aws-cli:latest
-    command:
-    - cat
-    tty: true
-  - name: git
-    image: alpine/git:latest
-    command:
-    - cat
-    tty: true
-  volumes:
-  - name: docker-sock
-    hostPath:
-      path: /var/run/docker.sock
-'''
-        }
-    }
+    agent any
 
     environment {
         AWS_REGION = 'ap-northeast-2'
         ECR_REPOSITORY = 'tier3-backend'
         VERSION_TAG = 'backend-v1.0'
         GITHUB_CREDS = credentials('github-token')
+        AWS_ACCOUNT_ID = '123456789012'
     }
 
     stages {
@@ -49,7 +14,6 @@ spec:
             steps {
                 checkout scm
                 script {
-                    // 타임스탬프 태그 생성 (모든 컨테이너에서 사용 가능하도록)
                     env.TIMESTAMP_TAG = sh(script: "date '+%Y%m%d%H%M%S'", returnStdout: true).trim()
                 }
             }
@@ -57,29 +21,30 @@ spec:
 
         stage('Test') {
             steps {
-                container('golang') {
-                    sh '''
-                        echo "Go 버전 확인"
-                        go version
-                        echo "Go 모듈 다운로드"
-                        go mod download
-                        echo "Go 린트 도구 설치"
-                        go get golang.org/x/lint/golint
-                        echo "코드 검증 실행"
-                        make validate
-                    '''
-                }
+                sh '''
+                    echo "Go 버전 확인"
+                    go version
+                    echo "Go 모듈 다운로드"
+                    go mod download
+                    echo "Go 린트 도구 설치"
+                    go get golang.org/x/lint/golint
+                    echo "코드 검증 실행"
+                    make validate
+                '''
             }
         }
 
         stage('Get AWS Account ID') {
             steps {
-                container('aws') {
-                    script {
+                script {
+                    try {
                         env.AWS_ACCOUNT_ID = sh(
                             script: 'aws sts get-caller-identity --query Account --output text',
                             returnStdout: true
                         ).trim()
+                        echo "AWS 계정 ID: ${env.AWS_ACCOUNT_ID}"
+                    } catch (Exception e) {
+                        echo "AWS 계정 ID를 가져오는 데 실패했습니다. 기본값을 사용합니다."
                     }
                 }
             }
@@ -87,53 +52,41 @@ spec:
 
         stage('ECR Login') {
             steps {
-                container('aws') {
-                    sh "aws ecr get-login-password --region ${AWS_REGION} > /tmp/ecr_password"
-                }
-                container('docker') {
-                    sh "cat /tmp/ecr_password | docker login --username AWS --password-stdin ${env.AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-                    sh "rm -f /tmp/ecr_password"
-                }
+                sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${env.AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
             }
         }
 
         stage('Build and Tag Docker Image') {
             steps {
-                container('docker') {
-                    script {
-                        def ecrUrl = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-                        
-                        sh """
-                            docker build -t ${ecrUrl}/${ECR_REPOSITORY}:${VERSION_TAG} .
-                            docker tag ${ecrUrl}/${ECR_REPOSITORY}:${VERSION_TAG} ${ecrUrl}/${ECR_REPOSITORY}:latest
-                            docker tag ${ecrUrl}/${ECR_REPOSITORY}:${VERSION_TAG} ${ecrUrl}/${ECR_REPOSITORY}:${TIMESTAMP_TAG}
-                        """
-                    }
+                script {
+                    def ecrUrl = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+                    
+                    sh """
+                        docker build -t ${ecrUrl}/${ECR_REPOSITORY}:${VERSION_TAG} .
+                        docker tag ${ecrUrl}/${ECR_REPOSITORY}:${VERSION_TAG} ${ecrUrl}/${ECR_REPOSITORY}:latest
+                        docker tag ${ecrUrl}/${ECR_REPOSITORY}:${VERSION_TAG} ${ecrUrl}/${ECR_REPOSITORY}:${TIMESTAMP_TAG}
+                    """
                 }
             }
         }
 
         stage('Push to ECR') {
             steps {
-                container('docker') {
-                    script {
-                        def ecrUrl = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-                        
-                        sh """
-                            docker push ${ecrUrl}/${ECR_REPOSITORY}:${VERSION_TAG}
-                            docker push ${ecrUrl}/${ECR_REPOSITORY}:latest
-                            docker push ${ecrUrl}/${ECR_REPOSITORY}:${TIMESTAMP_TAG}
-                        """
-                    }
+                script {
+                    def ecrUrl = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+                    
+                    sh """
+                        docker push ${ecrUrl}/${ECR_REPOSITORY}:${VERSION_TAG}
+                        docker push ${ecrUrl}/${ECR_REPOSITORY}:latest
+                        docker push ${ecrUrl}/${ECR_REPOSITORY}:${TIMESTAMP_TAG}
+                    """
                 }
             }
         }
 
         stage('Update Manifest Repository') {
             steps {
-                container('git') {
-                    // 업데이트 스크립트 생성
-                    writeFile file: 'update_manifest.sh', text: """#!/bin/sh
+                writeFile file: 'update_manifest.sh', text: """#!/bin/sh
 set -e
 
 # Git 설정
@@ -166,24 +119,23 @@ cd ..
 rm -rf 3tier-manifest
 """
 
-                    // 스크립트 실행 권한 부여 및 실행
-                    sh 'chmod +x update_manifest.sh && ./update_manifest.sh'
-                }
+                sh 'chmod +x update_manifest.sh && ./update_manifest.sh'
             }
         }
     }
 
     post {
         always {
-            container('docker') {
-                script {
+            script {
+                try {
                     def ecrUrl = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-                    
                     sh """
                         docker rmi ${ecrUrl}/${ECR_REPOSITORY}:${VERSION_TAG} || true
                         docker rmi ${ecrUrl}/${ECR_REPOSITORY}:latest || true
                         docker rmi ${ecrUrl}/${ECR_REPOSITORY}:${TIMESTAMP_TAG} || true
                     """
+                } catch (Exception e) {
+                    echo "이미지 정리 중 오류 발생: ${e.message}"
                 }
             }
         }
